@@ -1,0 +1,54 @@
+package com.yourteam.dataprocessing
+
+data class Spo2Reading(
+    val epochMillis: Long,
+    val spo2: Double
+)
+
+data class Spo2UiOutput(
+    val epochMillis: Long,
+    val spo2: Double,
+    val risk: RiskColor
+)
+
+data class Spo2MlEvent(
+    val epochMillis: Long,
+    val spo2: Double,
+    val risk: RiskColor
+)
+
+data class Spo2EngineOutput(
+    val ui: Spo2UiOutput,
+    val mlEvent: Spo2MlEvent?
+)
+
+class Spo2Engine {
+
+    fun update(reading: Spo2Reading): Spo2EngineOutput {
+
+        val value = reading.spo2.coerceIn(0.0, 100.0)
+
+        val risk = when {
+            value < 90.0 -> RiskColor.RED
+            value <= 92.0 -> RiskColor.ORANGE
+            value <= 94.0 -> RiskColor.YELLOW
+            else -> RiskColor.GREEN
+        }
+
+        val ui = Spo2UiOutput(
+            epochMillis = reading.epochMillis,
+            spo2 = value,
+            risk = risk
+        )
+
+        val mlEvent = if (risk != RiskColor.GREEN) {
+            Spo2MlEvent(
+                epochMillis = reading.epochMillis,
+                spo2 = value,
+                risk = risk
+            )
+        } else null
+
+        return Spo2EngineOutput(ui, mlEvent)
+    }
+}
