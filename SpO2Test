@@ -1,0 +1,42 @@
+package com.yourteam.dataprocessing
+
+import org.junit.Test
+import java.text.SimpleDateFormat
+import java.util.*
+import kotlin.random.Random
+
+class SpO2Test {
+
+    private val engine = Spo2Engine()
+    private val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+    @Test
+    fun printSimulatedSpo2Stream() {
+
+        var currentTime = System.currentTimeMillis()
+
+        val sampleData = listOf(
+            98.0, 97.0, 95.0, 94.0, 93.0,
+            92.0, 91.0, 90.0, 89.0,
+            96.0, 98.0
+        )
+
+        sampleData.forEachIndexed { index, spo2 ->
+
+            val reading = Spo2Reading(
+                epochMillis = currentTime,
+                spo2 = spo2
+            )
+
+            val out = engine.update(reading)
+
+            val ts = formatter.format(Date(currentTime))
+
+            val line = "${index + 1}. ts=$ts spo2=$spo2 risk=${out.ui.risk} mlEvent=${out.mlEvent != null}"
+
+            System.out.println(line)
+
+            currentTime += Random.nextLong(3000, 8000)
+        }
+    }
+}
