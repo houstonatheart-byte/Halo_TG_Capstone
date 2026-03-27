@@ -1,0 +1,58 @@
+package com.yourteam.dataprocessing
+
+data class TemperatureReading(
+    val epochMillis: Long,
+    val temperatureC: Double
+)
+
+data class TemperatureUiOutput(
+    val epochMillis: Long,
+    val temperatureC: Double,
+    val risk: RiskColor
+)
+
+data class TemperatureMlEvent(
+    val epochMillis: Long,
+    val temperatureC: Double,
+    val risk: RiskColor
+)
+
+data class TemperatureEngineOutput(
+    val ui: TemperatureUiOutput,
+    val mlEvent: TemperatureMlEvent?
+)
+
+class TemperatureEngine {
+
+    fun update(reading: TemperatureReading): TemperatureEngineOutput {
+        val value = reading.temperatureC.coerceIn(25.0, 45.0)
+
+        val risk = when {
+            value < 35.0 -> RiskColor.RED
+            value <= 35.9 -> RiskColor.ORANGE
+            value <= 36.4 -> RiskColor.YELLOW
+            else -> RiskColor.GREEN
+        }
+
+        val ui = TemperatureUiOutput(
+            epochMillis = reading.epochMillis,
+            temperatureC = value,
+            risk = risk
+        )
+
+        val mlEvent = if (risk != RiskColor.GREEN) {
+            TemperatureMlEvent(
+                epochMillis = reading.epochMillis,
+                temperatureC = value,
+                risk = risk
+            )
+        } else {
+            null
+        }
+
+        return TemperatureEngineOutput(
+            ui = ui,
+            mlEvent = mlEvent
+        )
+    }
+}
