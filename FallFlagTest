@@ -1,0 +1,43 @@
+package com.yourteam.dataprocessing
+
+import org.junit.Test
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.random.Random
+
+class FallFlagTest {
+
+    private val engine = FallFlagEngine()
+    private val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+    @Test
+    fun printSimulatedFallStream() {
+        var currentTime = System.currentTimeMillis()
+
+        val sampleData = listOf(
+            0.0, 1.5, 3.9, 4.0, 4.2,
+            6.5, 9.8, 10.0, 10.3,
+            15.0, 19.9, 20.0, 20.4,
+            2.0, 0.0, 25.0
+        )
+
+        sampleData.forEachIndexed { index, feet ->
+            val reading = FallReading(
+                epochMillis = currentTime,
+                fallDistanceFeet = feet
+            )
+
+            val out = engine.update(reading)
+
+            val ts = formatter.format(Date(currentTime))
+            val distance = "%.1f".format(feet)
+
+            val line = "${index + 1}. ts=$ts fallFeet=$distance risk=${out.ui.risk} mlEvent=${out.mlEvent != null}"
+
+            System.out.println(line)
+
+            currentTime += Random.nextLong(3000, 8000)
+        }
+    }
+}
