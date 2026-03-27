@@ -1,0 +1,90 @@
+package com.yourteam.dataprocessing
+
+/** Incoming fall data */
+data class FallReading(
+    val epochMillis: Long,
+    val fallDistanceFeet: Double
+)
+
+/** Always send this to the UI */
+data class FallUiOutput(
+    val epochMillis: Long,
+    val fallDistanceFeet: Double,
+    val fallDistanceDisplay: String,
+    val risk: RiskColor
+)
+
+/** Only send this when risk != GREEN */
+data class FallMlEvent(
+    val epochMillis: Long,
+    val fallDistanceFeet: Double,
+    val risk: RiskColor
+)
+
+/** One return object from one function call */
+data class FallEngineOutput(
+    val ui: FallUiOutput,
+    val mlEvent: FallMlEvent?
+)
+
+/**
+ * Risk rules:
+ * - Green: <= 4 ft
+ * - Yellow: > 4 ft
+ * - Orange: > 10 ft
+ * - Red: > 20 ft
+ */
+data class FallRiskConfig(
+    val cautionThresholdFeet: Double = 4.0,
+    val moderateThresholdFeet: Double = 10.0,
+    val highThresholdFeet: Double = 20.0,
+    val minFeet: Double = 0.0,
+    val maxFeet: Double = 100.0
+)
+
+class FallFlagEngine(private val cfg: FallRiskConfig = FallRiskConfig()) {
+
+    fun update(reading: FallReading): FallEngineOutput {
+        // 0) Basic sanity filter
+        val r = reading.copy(
+            fallDistanceFeet = reading.fallDistanceFeet.coerceIn(cfg.minFeet, cfg.maxFeet)
+        )
+
+        // 1) Risk classification
+        val risk = classifyRisk(r.fallDistanceFeet)
+
+        // 2) UI output (always)
+        val ui = FallUiOutput(
+            epochMillis = r.epochMillis,
+            fallDistanceFeet = r.fallDistanceFeet,
+            fallDistanceDisplay = "${format1(r.fallDistanceFeet)} ft",
+            risk = risk
+        )
+
+        // 3) Event output (only when not green)
+        val mlEvent =
+            if (risk != RiskColor.GREEN) {
+                FallMlEvent(
+                    epochMillis = r.epochMillis,
+                    fallDistanceFeet = r.fallDistanceFeet,
+                    risk = risk
+                )
+            } else null
+
+        return FallEngineOutput(
+            ui = ui,
+            mlEvent = mlEvent
+        )
+    }
+
+    private fun classifyRisk(fallDistanceFeet: Double): RiskColor {
+        return when {
+            fallDistanceFeet > cfg.highThresholdFeet -> RiskColor.RED
+            fallDistanceFeet > cfg.moderateThresholdFeet -> RiskColor.ORANGE
+            fallDistanceFeet > cfg.cautionThresholdFeet -> RiskColor.YELLOW
+            else -> RiskColor.GREEN
+        }
+    }
+
+    private fun format1(x: Double): String = String.format("%.1f", x)
+}
