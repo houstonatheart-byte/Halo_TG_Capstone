@@ -1,0 +1,340 @@
+//Put in (test)
+package com.yourteam.dataprocessing
+
+import org.junit.Test
+
+class MultiLocationVitalsProcessorTest {
+
+    private val processor = MultiLocationVitalsProcessor()
+
+    @Test
+    fun printAllMajorScenarios() {
+        printScenario(
+            title = "1. Normal / expected values",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis(),
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 102.0,
+                        temperatureC = 36.6,
+                        spo2 = 97.0,
+                        fallDistanceFeet = 0.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 100.0,
+                        temperatureC = 36.3,
+                        spo2 = 96.0,
+                        fallDistanceFeet = 0.8
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 101.0,
+                        spo2 = 95.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        heartRateBpm = 99.0,
+                        fallDistanceFeet = 1.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        heartRateBpm = 100.0,
+                        spo2 = 98.0
+                    )
+                )
+            )
+        )
+
+        printScenario(
+            title = "2. HR outlier rejected (upper arm bad)",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 1000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 102.0,
+                        temperatureC = 36.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 100.0,
+                        temperatureC = 36.4
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 180.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        fallDistanceFeet = 1.2
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        spo2 = 97.0
+                    )
+                )
+            )
+        )
+
+        printScenario(
+            title = "3. Temperature outlier rejected (upper chest bad)",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 2000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 99.0,
+                        temperatureC = 36.4
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 100.0,
+                        temperatureC = 39.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 98.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        fallDistanceFeet = 0.6
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        spo2 = 96.0
+                    )
+                )
+            )
+        )
+
+        printScenario(
+            title = "4. SpO2 disagreement from non-dominant sensor",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 3000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 101.0,
+                        temperatureC = 36.6,
+                        spo2 = 92.0   // non-dominant site disagrees with finger
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 100.0,
+                        temperatureC = 36.4,
+                        spo2 = 91.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 99.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        fallDistanceFeet = 0.8
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        spo2 = 97.0
+                    )
+                )
+            )
+        )
+
+        printScenario(
+            title = "5. Fall disagreement from non-dominant sensor",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 4000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 100.0,
+                        temperatureC = 36.5,
+                        fallDistanceFeet = 8.5   // monitor-only disagreement
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 98.0,
+                        temperatureC = 36.3,
+                        fallDistanceFeet = 7.8
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 101.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        fallDistanceFeet = 1.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        spo2 = 98.0
+                    )
+                )
+            )
+        )
+
+        printScenario(
+            title = "6. Multiple issues together",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 5000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 104.0,
+                        temperatureC = 36.5,
+                        spo2 = 90.0,
+                        fallDistanceFeet = 7.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 103.0,
+                        temperatureC = 40.0,
+                        spo2 = 89.0,
+                        fallDistanceFeet = 8.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 175.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        fallDistanceFeet = 12.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        spo2 = 92.0
+                    )
+                )
+            )
+        )
+
+        printScenario(
+            title = "7. Missing primary finger SpO2",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 6000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 101.0,
+                        temperatureC = 36.4,
+                        spo2 = 95.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 100.0,
+                        temperatureC = 36.3,
+                        spo2 = 94.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 99.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.WAIST_HIP,
+                        fallDistanceFeet = 0.7
+                    )
+                    // No finger packet
+                )
+            )
+        )
+
+        printScenario(
+            title = "8. Missing waist/hip fall sensor",
+            raw = RawMultiLocationData(
+                epochMillis = System.currentTimeMillis() + 7000,
+                readings = listOf(
+                    LocationVitalReading(
+                        location = LocationType.FOREHEAD,
+                        heartRateBpm = 102.0,
+                        temperatureC = 36.5,
+                        fallDistanceFeet = 6.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_CHEST,
+                        heartRateBpm = 100.0,
+                        temperatureC = 36.2,
+                        fallDistanceFeet = 5.5
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.UPPER_ARM,
+                        heartRateBpm = 101.0
+                    ),
+                    LocationVitalReading(
+                        location = LocationType.FINGER,
+                        spo2 = 97.0
+                    )
+                    // No waist packet
+                )
+            )
+        )
+    }
+
+    private fun printScenario(title: String, raw: RawMultiLocationData) {
+        println("")
+        println("============================================================")
+        println(title)
+        println("============================================================")
+        println("RAW INPUT:")
+        raw.readings.forEachIndexed { index, reading ->
+            println(
+                "${index + 1}. " +
+                        "location=${reading.location}, " +
+                        "HR=${reading.heartRateBpm}, " +
+                        "SpO2=${reading.spo2}, " +
+                        "Temp=${reading.temperatureC}, " +
+                        "Motion=${reading.motion}, " +
+                        "Fall=${reading.fallDistanceFeet}"
+            )
+        }
+
+        val result = processor.process(raw)
+
+        println("")
+        println("PROCESSED OUTPUT:")
+        println("HR UI: ${result.hr?.ui}")
+        println("HR Event: ${result.hr?.mlEvent}")
+
+        println("SpO2:")
+        println("  Value: ${result.spo2?.ui?.spo2}")
+        println("  Baseline: ${result.spo2?.ui?.baselineSpo2}")
+        println("  Drop: ${result.spo2?.ui?.spo2PctDropPercent}%")
+        println("  Risk: ${result.spo2?.ui?.risk}")
+
+        println("Temperature:")
+        println("  Value: ${result.temperature?.ui?.temperatureC}")
+        println("  Baseline: ${result.temperature?.ui?.baselineTemperatureC}")
+        println("  Drop: ${result.temperature?.ui?.temperaturePctDropPercent}%")
+        println("  Risk: ${result.temperature?.ui?.risk}")
+
+        println("Fall UI: ${result.fall?.ui}")
+        println("Fall Event: ${result.fall?.mlEvent}")
+
+        println("")
+        println("SENSOR HEALTH / ALERTS:")
+        println("Rejected HR Sensors: ${result.rejectedHrSensors}")
+        println("Rejected Temperature Sensors: ${result.rejectedTemperatureSensors}")
+        println("Monitor Alerts: ${result.monitorAlerts}")
+
+        println("")
+        println("UI-FRIENDLY ALERTS:")
+        if (result.rejectedHrSensors.isNotEmpty()) {
+            println("Check HR sensor(s): ${result.rejectedHrSensors.joinToString()}")
+        }
+        if (result.rejectedTemperatureSensors.isNotEmpty()) {
+            println("Check temperature sensor(s): ${result.rejectedTemperatureSensors.joinToString()}")
+        }
+        if (result.monitorAlerts.isNotEmpty()) {
+            result.monitorAlerts.forEach { println(it) }
+        }
+        if (result.rejectedHrSensors.isEmpty() &&
+            result.rejectedTemperatureSensors.isEmpty() &&
+            result.monitorAlerts.isEmpty()
+        ) {
+            println("No sensor-quality alerts.")
+        }
+
+        println("")
+    }
+}
