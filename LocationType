@@ -1,0 +1,11 @@
+//This goes in processing
+//This is to distinguish sensor processing
+package com.yourteam.dataprocessing
+
+enum class LocationType {
+    FOREHEAD,
+    UPPER_CHEST,
+    UPPER_ARM,
+    WAIST_HIP,
+    FINGER
+}
