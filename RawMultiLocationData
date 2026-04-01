@@ -1,0 +1,16 @@
+//This goes in processing
+package com.yourteam.dataprocessing
+
+data class LocationVitalReading(
+    val location: LocationType,
+    val heartRateBpm: Double? = null,
+    val spo2: Double? = null,
+    val temperatureC: Double? = null,
+    val motion: Double? = null,
+    val fallDistanceFeet: Double? = null
+)
+
+data class RawMultiLocationData(
+    val epochMillis: Long,
+    val readings: List<LocationVitalReading>
+)
