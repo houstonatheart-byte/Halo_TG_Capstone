@@ -1,0 +1,60 @@
+package com.yourteam.dataprocessing
+
+class MultiLocationVitalsProcessor(
+    private val fusionProcessor: VitalFusionProcessor = VitalFusionProcessor(),
+    private val heartRateEngine: HeartRateEngine = HeartRateEngine(),
+    private val spo2Engine: Spo2Engine = Spo2Engine(),
+    private val temperatureEngine: TemperatureEngine = TemperatureEngine(),
+    private val fallFlagEngine: FallFlagEngine = FallFlagEngine()
+) {
+
+    fun process(raw: RawMultiLocationData): ProcessedVitalsResult {
+        val fused = fusionProcessor.fuse(raw)
+
+        val hrOutput = fused.heartRateBpm?.let { bpmValue ->
+            heartRateEngine.update(
+                HrReading(
+                    epochMillis = fused.epochMillis,
+                    bpm = bpmValue
+                )
+            )
+        }
+
+        val spo2Output = fused.spo2?.let { spo2Value ->
+            spo2Engine.update(
+                Spo2Reading(
+                    epochMillis = fused.epochMillis,
+                    spo2 = spo2Value
+                )
+            )
+        }
+
+        val tempOutput = fused.temperatureC?.let { tempValue ->
+            temperatureEngine.update(
+                TemperatureReading(
+                    epochMillis = fused.epochMillis,
+                    temperatureC = tempValue
+                )
+            )
+        }
+
+        val fallOutput = fused.fallDistanceFeet?.let { fallValue ->
+            fallFlagEngine.update(
+                FallReading(
+                    epochMillis = fused.epochMillis,
+                    fallDistanceFeet = fallValue
+                )
+            )
+        }
+
+        return ProcessedVitalsResult(
+            hr = hrOutput,
+            spo2 = spo2Output,
+            temperature = tempOutput,
+            fall = fallOutput,
+            rejectedHrSensors = fusionProcessor.lastRejectedHrSensors,
+            rejectedTemperatureSensors = fusionProcessor.lastRejectedTemperatureSensors,
+            monitorAlerts = fusionProcessor.lastMonitorAlerts
+        )
+    }
+}
