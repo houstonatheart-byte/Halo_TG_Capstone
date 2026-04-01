@@ -1,0 +1,10 @@
+//This is Processing
+package com.yourteam.dataprocessing
+
+data class FusedVitals(
+    val epochMillis: Long,
+    val heartRateBpm: Int? = null,
+    val spo2: Double? = null,
+    val temperatureC: Double? = null,
+    val fallDistanceFeet: Double? = null
+)
