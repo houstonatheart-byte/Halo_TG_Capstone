@@ -1,0 +1,235 @@
+//Put in processing
+package com.yourteam.dataprocessing
+
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+class VitalFusionProcessor {
+
+    // HR: Forehead > Upper chest > Upper arm
+    private val hrWeights = mapOf(
+        LocationType.FOREHEAD to 0.60,
+        LocationType.UPPER_CHEST to 0.25,
+        LocationType.UPPER_ARM to 0.15
+    )
+
+    // Temp: Forehead > Upper chest
+    private val tempWeights = mapOf(
+        LocationType.FOREHEAD to 0.75,
+        LocationType.UPPER_CHEST to 0.25
+    )
+
+    // Saved for UI/debug after each fuse() call
+    var lastRejectedHrSensors: List<LocationType> = emptyList()
+        private set
+
+    var lastRejectedTemperatureSensors: List<LocationType> = emptyList()
+        private set
+
+    var lastMonitorAlerts: List<String> = emptyList()
+        private set
+
+    fun fuse(raw: RawMultiLocationData): FusedVitals {
+        lastRejectedHrSensors = emptyList()
+        lastRejectedTemperatureSensors = emptyList()
+        lastMonitorAlerts = emptyList()
+
+        // -------------------------
+        // HR: weighted + outlier rejection
+        // -------------------------
+        val hrCandidates = raw.readings.mapNotNull { reading ->
+            val value = reading.heartRateBpm
+            val weight = hrWeights[reading.location]
+
+            if (value != null && weight != null) {
+                Triple(reading.location, value, weight)
+            } else {
+                null
+            }
+        }
+
+        val filteredHrCandidates = filterHrOutliers(hrCandidates)
+        val fusedHr = weightedAverageFromTriples(filteredHrCandidates)?.roundToInt()
+
+        // -------------------------
+        // Temperature: weighted + optional outlier rejection
+        // -------------------------
+        val tempCandidates = raw.readings.mapNotNull { reading ->
+            val value = reading.temperatureC
+            val weight = tempWeights[reading.location]
+
+            if (value != null && weight != null) {
+                Triple(reading.location, value, weight)
+            } else {
+                null
+            }
+        }
+
+        val filteredTempCandidates = filterTemperatureOutliers(tempCandidates)
+        val fusedTemp = weightedAverageFromTriples(filteredTempCandidates)
+
+        // -------------------------
+        // SpO2: finger only for fused value
+        // Other site readings are monitor-only
+        // -------------------------
+        val fusedSpo2 = raw.readings
+            .firstOrNull { it.location == LocationType.FINGER && it.spo2 != null }
+            ?.spo2
+
+        val nonFingerSpo2 = raw.readings.filter {
+            it.location != LocationType.FINGER && it.spo2 != null
+        }
+
+        if (fusedSpo2 != null && nonFingerSpo2.isNotEmpty()) {
+            val spo2Alerts = nonFingerSpo2.mapNotNull { reading ->
+                val other = reading.spo2 ?: return@mapNotNull null
+                val diff = abs(other - fusedSpo2)
+
+                if (diff >= 3.0) {
+                    "SpO2 disagreement: ${reading.location}=$other vs FINGER=$fusedSpo2"
+                } else {
+                    null
+                }
+            }
+
+            if (spo2Alerts.isNotEmpty()) {
+                lastMonitorAlerts = lastMonitorAlerts + spo2Alerts
+                println("⚠️ SPO2 MONITOR ALERTS")
+                spo2Alerts.forEach { println(it) }
+            }
+        }
+
+        // -------------------------
+        // Fall: waist/hip only for fused value
+        // Other site readings are monitor-only
+        // -------------------------
+        val fusedFall = raw.readings
+            .firstOrNull { it.location == LocationType.WAIST_HIP && it.fallDistanceFeet != null }
+            ?.fallDistanceFeet
+
+        val nonWaistFall = raw.readings.filter {
+            it.location != LocationType.WAIST_HIP && it.fallDistanceFeet != null
+        }
+
+        if (fusedFall != null && nonWaistFall.isNotEmpty()) {
+            val fallAlerts = nonWaistFall.mapNotNull { reading ->
+                val other = reading.fallDistanceFeet ?: return@mapNotNull null
+                val diff = abs(other - fusedFall)
+
+                if (diff >= 4.0) {
+                    "Fall disagreement: ${reading.location}=$other ft vs WAIST_HIP=$fusedFall ft"
+                } else {
+                    null
+                }
+            }
+
+            if (fallAlerts.isNotEmpty()) {
+                lastMonitorAlerts = lastMonitorAlerts + fallAlerts
+                println("⚠️ FALL MONITOR ALERTS")
+                fallAlerts.forEach { println(it) }
+            }
+        }
+
+        return FusedVitals(
+            epochMillis = raw.epochMillis,
+            heartRateBpm = fusedHr,
+            spo2 = fusedSpo2,
+            temperatureC = fusedTemp,
+            fallDistanceFeet = fusedFall
+        )
+    }
+
+    private fun filterHrOutliers(
+        readings: List<Triple<LocationType, Double, Double>>,
+        maxDeviationPercent: Double = 0.30
+    ): List<Triple<LocationType, Double, Double>> {
+        if (readings.size < 2) {
+            lastRejectedHrSensors = emptyList()
+            return readings
+        }
+
+        val avg = readings.map { it.second }.average()
+        if (avg == 0.0) {
+            lastRejectedHrSensors = emptyList()
+            return readings
+        }
+
+        val kept = mutableListOf<Triple<LocationType, Double, Double>>()
+        val removed = mutableListOf<Triple<LocationType, Double, Double>>()
+
+        readings.forEach { triple ->
+            val (_, value, _) = triple
+            val deviation = abs(value - avg) / avg
+
+            if (deviation <= maxDeviationPercent) {
+                kept.add(triple)
+            } else {
+                removed.add(triple)
+            }
+        }
+
+        lastRejectedHrSensors = removed.map { it.first }
+
+        if (removed.isNotEmpty()) {
+            println("⚠️ HR OUTLIER DETECTED")
+            println("Average HR: %.2f".format(avg))
+            removed.forEach { println("REMOVED HR → ${it.first} : ${it.second}") }
+            kept.forEach { println("KEPT HR → ${it.first} : ${it.second}") }
+        }
+
+        return kept
+    }
+
+    private fun filterTemperatureOutliers(
+        readings: List<Triple<LocationType, Double, Double>>,
+        maxDeviationPercent: Double = 0.05
+    ): List<Triple<LocationType, Double, Double>> {
+        if (readings.size < 2) {
+            lastRejectedTemperatureSensors = emptyList()
+            return readings
+        }
+
+        val avg = readings.map { it.second }.average()
+        if (avg == 0.0) {
+            lastRejectedTemperatureSensors = emptyList()
+            return readings
+        }
+
+        val kept = mutableListOf<Triple<LocationType, Double, Double>>()
+        val removed = mutableListOf<Triple<LocationType, Double, Double>>()
+
+        readings.forEach { triple ->
+            val (_, value, _) = triple
+            val deviation = abs(value - avg) / avg
+
+            if (deviation <= maxDeviationPercent) {
+                kept.add(triple)
+            } else {
+                removed.add(triple)
+            }
+        }
+
+        lastRejectedTemperatureSensors = removed.map { it.first }
+
+        if (removed.isNotEmpty()) {
+            println("⚠️ TEMPERATURE OUTLIER DETECTED")
+            println("Average Temp: %.2f".format(avg))
+            removed.forEach { println("REMOVED TEMP → ${it.first} : ${it.second}") }
+            kept.forEach { println("KEPT TEMP → ${it.first} : ${it.second}") }
+        }
+
+        return kept
+    }
+
+    private fun weightedAverageFromTriples(
+        values: List<Triple<LocationType, Double, Double>>
+    ): Double? {
+        if (values.isEmpty()) return null
+
+        val weightedSum = values.sumOf { (_, value, weight) -> value * weight }
+        val totalWeight = values.sumOf { (_, _, weight) -> weight }
+
+        if (totalWeight == 0.0) return null
+        return weightedSum / totalWeight
+    }
+}
