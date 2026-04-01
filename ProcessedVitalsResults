@@ -1,0 +1,14 @@
+//Put in processing
+package com.yourteam.dataprocessing
+
+data class ProcessedVitalsResult(
+    val hr: EngineOutput? = null,
+    val spo2: Spo2EngineOutput? = null,
+    val temperature: TemperatureEngineOutput? = null,
+    val fall: FallEngineOutput? = null,
+
+    // UI/debug support
+    val rejectedHrSensors: List<LocationType> = emptyList(),
+    val rejectedTemperatureSensors: List<LocationType> = emptyList(),
+    val monitorAlerts: List<String> = emptyList()
+)
