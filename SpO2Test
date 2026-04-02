@@ -1,11 +1,15 @@
-package com.yourteam.dataprocessing
+/*
+ * Created and Designed by: Tiffany Gillmore.
+ */
+
+package com.tactical.app_profile.dataprocessing
 
 import org.junit.Test
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.random.Random
 
-class SpO2Test {
+class SpO2Test_TG {
 
     private val engine = Spo2Engine()
     private val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
