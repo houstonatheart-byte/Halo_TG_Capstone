@@ -1,4 +1,4 @@
-package com.yourteam.dataprocessing
+package com.tactical.app_profile.dataprocessing
 
 data class TemperatureReading(
     val epochMillis: Long,
@@ -8,12 +8,18 @@ data class TemperatureReading(
 data class TemperatureUiOutput(
     val epochMillis: Long,
     val temperatureC: Double,
+    val baselineTemperatureC: Double?,
+    val temperaturePctDrop: Double?,
+    val temperaturePctDropPercent: Double?,
     val risk: RiskColor
 )
 
 data class TemperatureMlEvent(
     val epochMillis: Long,
     val temperatureC: Double,
+    val baselineTemperatureC: Double?,
+    val temperaturePctDrop: Double?,
+    val temperaturePctDropPercent: Double?,
     val risk: RiskColor
 )
 
@@ -24,8 +30,17 @@ data class TemperatureEngineOutput(
 
 class TemperatureEngine {
 
+    private val history = ArrayDeque<Double>()
+    private val baselineWindowSize = 10
+
     fun update(reading: TemperatureReading): TemperatureEngineOutput {
         val value = reading.temperatureC.coerceIn(25.0, 45.0)
+
+        val baseline = if (history.isNotEmpty()) history.average() else null
+        val pctDrop = baseline?.let {
+            if (it > 0.0) (it - value) / it else null
+        }
+        val pctDropPercent = pctDrop?.times(100.0)
 
         val risk = when {
             value < 35.0 -> RiskColor.RED
@@ -37,6 +52,9 @@ class TemperatureEngine {
         val ui = TemperatureUiOutput(
             epochMillis = reading.epochMillis,
             temperatureC = value,
+            baselineTemperatureC = baseline,
+            temperaturePctDrop = pctDrop,
+            temperaturePctDropPercent = pctDropPercent,
             risk = risk
         )
 
@@ -44,10 +62,18 @@ class TemperatureEngine {
             TemperatureMlEvent(
                 epochMillis = reading.epochMillis,
                 temperatureC = value,
+                baselineTemperatureC = baseline,
+                temperaturePctDrop = pctDrop,
+                temperaturePctDropPercent = pctDropPercent,
                 risk = risk
             )
         } else {
             null
+        }
+
+        history.addLast(value)
+        if (history.size > baselineWindowSize) {
+            history.removeFirst()
         }
 
         return TemperatureEngineOutput(
