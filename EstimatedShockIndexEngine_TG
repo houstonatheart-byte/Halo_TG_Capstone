@@ -1,0 +1,157 @@
+package com.tactical.app_profile.dataprocessing
+
+/*
+ * Created and Designed by: Tiffany Gillmore.
+ *
+ * EstimatedShockIndexEngine_TG
+ *
+ * Purpose:
+ * - Compute estimated Shock Index from heart rate and estimated SBP
+ * - Provide simple quality gating and risk classification
+ * - Serve as the next step after EstimatedSbpEngine_TG
+ *
+ * Formula:
+ *   Shock Index = HR / SBP
+ *
+ * Notes:
+ * - This is an estimated/project engine, not a clinical diagnostic tool
+ * - Designed to pair with EstimatedSbpEngine_TG output
+ */
+
+data class EstimatedShockIndexConfig_TG(
+    val minHrBpm: Int = 20,
+    val maxHrBpm: Int = 240,
+    val minSbp: Double = 60.0,
+    val maxSbp: Double = 220.0,
+    val minSbpQuality: Double = 0.40,
+
+    // Common project-friendly bands
+    val normalUpper: Double = 0.70,
+    val elevatedUpper: Double = 0.90,
+    val highUpper: Double = 1.10
+)
+
+data class EstimatedShockIndexOutput_TG(
+    val epochMillis: Long,
+    val heartRateBpm: Int?,
+    val estimatedSbp: Double?,
+    val shockIndex: Double?,
+    val sbpQuality: Double,
+    val sbpCalibrated: Boolean,
+    val status: String,
+    val riskLevel: String,
+    val riskColor: String,
+    val detail: String
+)
+
+class EstimatedShockIndexEngine_TG(
+    private val config: EstimatedShockIndexConfig_TG = EstimatedShockIndexConfig_TG()
+) {
+
+    /**
+     * Main direct update function if you already have HR + SBP values.
+     */
+    fun update(
+        epochMillis: Long,
+        heartRateBpm: Int?,
+        estimatedSbp: Double?,
+        sbpQuality: Double = 0.0,
+        sbpCalibrated: Boolean = false
+    ): EstimatedShockIndexOutput_TG {
+        if (heartRateBpm == null || heartRateBpm !in config.minHrBpm..config.maxHrBpm) {
+            return EstimatedShockIndexOutput_TG(
+                epochMillis = epochMillis,
+                heartRateBpm = heartRateBpm,
+                estimatedSbp = estimatedSbp,
+                shockIndex = null,
+                sbpQuality = sbpQuality,
+                sbpCalibrated = sbpCalibrated,
+                status = "INVALID_HR",
+                riskLevel = "Unknown",
+                riskColor = "Gray",
+                detail = "Heart rate is missing or outside the allowed range."
+            )
+        }
+
+        if (estimatedSbp == null || estimatedSbp < config.minSbp || estimatedSbp > config.maxSbp) {
+            return EstimatedShockIndexOutput_TG(
+                epochMillis = epochMillis,
+                heartRateBpm = heartRateBpm,
+                estimatedSbp = estimatedSbp,
+                shockIndex = null,
+                sbpQuality = sbpQuality,
+                sbpCalibrated = sbpCalibrated,
+                status = "INVALID_SBP",
+                riskLevel = "Unknown",
+                riskColor = "Gray",
+                detail = "Estimated SBP is missing or outside the allowed range."
+            )
+        }
+
+        if (sbpQuality < config.minSbpQuality) {
+            return EstimatedShockIndexOutput_TG(
+                epochMillis = epochMillis,
+                heartRateBpm = heartRateBpm,
+                estimatedSbp = estimatedSbp,
+                shockIndex = null,
+                sbpQuality = sbpQuality,
+                sbpCalibrated = sbpCalibrated,
+                status = "LOW_SBP_QUALITY",
+                riskLevel = "Unknown",
+                riskColor = "Gray",
+                detail = "Estimated SBP quality is too low to compute a reliable shock index."
+            )
+        }
+
+        val shockIndex = heartRateBpm.toDouble() / estimatedSbp
+        val band = classifyShockIndex(shockIndex)
+
+        return EstimatedShockIndexOutput_TG(
+            epochMillis = epochMillis,
+            heartRateBpm = heartRateBpm,
+            estimatedSbp = estimatedSbp,
+            shockIndex = shockIndex,
+            sbpQuality = sbpQuality,
+            sbpCalibrated = sbpCalibrated,
+            status = if (sbpCalibrated) "OK" else "OK_UNCALIBRATED_SBP",
+            riskLevel = band.level,
+            riskColor = band.color,
+            detail = if (sbpCalibrated) {
+                "Shock index computed from HR and calibrated estimated SBP."
+            } else {
+                "Shock index computed from HR and uncalibrated estimated SBP."
+            }
+        )
+    }
+
+    /**
+     * Convenience overload for direct use with EstimatedSbpEngine_TG output.
+     */
+    fun updateFromEstimatedSbp(
+        sbpOutput: EstimatedSbpOutput_TG,
+        fallbackHeartRateBpm: Int? = sbpOutput.hrBpm
+    ): EstimatedShockIndexOutput_TG {
+        return update(
+            epochMillis = sbpOutput.epochMillis,
+            heartRateBpm = fallbackHeartRateBpm,
+            estimatedSbp = sbpOutput.estimatedSbp,
+            sbpQuality = sbpOutput.quality,
+            sbpCalibrated = sbpOutput.calibrated
+        )
+    }
+
+    private fun classifyShockIndex(shockIndex: Double): ShockIndexBand_TG {
+        return when {
+            shockIndex < 0.0 -> ShockIndexBand_TG("Unknown", "Gray")
+            shockIndex <= config.normalUpper -> ShockIndexBand_TG("Normal", "Green")
+            shockIndex <= config.elevatedUpper -> ShockIndexBand_TG("Elevated", "Yellow")
+            shockIndex <= config.highUpper -> ShockIndexBand_TG("High", "Orange")
+            else -> ShockIndexBand_TG("Severe", "Red")
+        }
+    }
+}
+
+private data class ShockIndexBand_TG(
+    val level: String,
+    val color: String
+)
