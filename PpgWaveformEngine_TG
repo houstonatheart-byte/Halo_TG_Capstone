@@ -1,9 +1,3 @@
-package com.tactical.app_profile.dataprocessing
-
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.sqrt
-
 /*
  * Created and Designed by: Tiffany Gillmore.
  *
@@ -32,6 +26,13 @@ import kotlin.math.sqrt
  * - DT_MS = sampling interval in ms (20 for 50 Hz)
  * - N = expected total samples in this waveform window
  */
+
+package com.tactical.app_profile.dataprocessing
+
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
+
 
 data class PpgWaveSample_TG(
     val index: Int,
