@@ -1,0 +1,523 @@
+package com.tactical.app_profile.dataprocessing
+
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
+
+/*
+ * Created and Designed by: Tiffany Gillmore.
+ *
+ * PpgWaveformEngine_TG
+ *
+ * Purpose:
+ * - Collect BLE waveform packets from the 2 PPG sensors
+ * - Reconstruct full waveform windows from:
+ *      WF_START
+ *      WF_DATA
+ *      WF_END
+ * - Keep each sensor separated by ROLE
+ * - Output a completed waveform window that later SBP/PTT engines can use
+ *
+ * Expected BLE formats:
+ *
+ * WF_START,ROLE:1,SEQ:12,TS0:1712345678901,DT_MS:20,N:1500
+ * WF_DATA,ROLE:1,SEQ:12,OFFSET:0,RED:123|124|125,IR:456|457|458
+ * WF_DATA,ROLE:1,SEQ:12,OFFSET:3,RED:126|127|128,IR:459|460|461
+ * WF_END,ROLE:1,SEQ:12
+ *
+ * Notes:
+ * - ROLE = which wearable sent the data
+ * - SEQ = upload window sequence number
+ * - TS0 = timestamp of sample index 0
+ * - DT_MS = sampling interval in ms (20 for 50 Hz)
+ * - N = expected total samples in this waveform window
+ */
+
+data class PpgWaveSample_TG(
+    val index: Int,
+    val timestampMs: Long,
+    val red: Int,
+    val ir: Int,
+    val present: Boolean
+)
+
+data class PpgWaveformFeatures_TG(
+    val redMean: Double = 0.0,
+    val irMean: Double = 0.0,
+    val redStd: Double = 0.0,
+    val irStd: Double = 0.0,
+    val redMin: Double = 0.0,
+    val redMax: Double = 0.0,
+    val irMin: Double = 0.0,
+    val irMax: Double = 0.0,
+    val redAc: Double = 0.0,
+    val irAc: Double = 0.0,
+    val redAcDcRatio: Double = 0.0,
+    val irAcDcRatio: Double = 0.0,
+    val redPeakCount: Int = 0,
+    val irPeakCount: Int = 0,
+    val estimatedRedRateBpm: Double = 0.0,
+    val estimatedIrRateBpm: Double = 0.0,
+    val signalQuality: Double = 0.0
+)
+
+data class CompletedPpgWaveformWindow_TG(
+    val role: Int,
+    val seq: Long,
+    val ts0: Long,
+    val dtMs: Long,
+    val expectedSamples: Int,
+    val receivedSamples: Int,
+    val completeness: Double,
+    val samples: List<PpgWaveSample_TG>,
+    val features: PpgWaveformFeatures_TG
+)
+
+data class WaveformStatusEvent_TG(
+    val role: Int?,
+    val seq: Long?,
+    val status: String,
+    val detail: String
+)
+
+private data class MutableWaveformWindow_TG(
+    val role: Int,
+    val seq: Long,
+    val ts0: Long,
+    val dtMs: Long,
+    val expectedSamples: Int,
+    val red: IntArray = IntArray(expectedSamples),
+    val ir: IntArray = IntArray(expectedSamples),
+    val received: BooleanArray = BooleanArray(expectedSamples)
+)
+
+class PpgWaveformEngine_TG(
+    private val onWaveformComplete: (CompletedPpgWaveformWindow_TG) -> Unit,
+    private val onWaveformStatus: ((WaveformStatusEvent_TG) -> Unit)? = null
+) {
+
+    private val activeWindowsByRole = mutableMapOf<Int, MutableWaveformWindow_TG>()
+
+    /**
+     * Call this on each fully assembled BLE line coming from the device.
+     */
+    fun processBleLine(line: String) {
+        val cleanLine = line.trim()
+        if (cleanLine.isEmpty()) return
+
+        when {
+            cleanLine.startsWith("WF_START") -> handleStart(cleanLine)
+            cleanLine.startsWith("WF_DATA")  -> handleData(cleanLine)
+            cleanLine.startsWith("WF_END")   -> handleEnd(cleanLine)
+        }
+    }
+
+    fun clearRole(role: Int) {
+        activeWindowsByRole.remove(role)
+    }
+
+    fun clearAll() {
+        activeWindowsByRole.clear()
+    }
+
+    private fun handleStart(line: String) {
+        val fields = parseKeyValueLine(line)
+
+        val role = fields["ROLE"]?.toIntOrNull()
+        val seq = fields["SEQ"]?.toLongOrNull()
+        val ts0 = fields["TS0"]?.toLongOrNull()
+        val dtMs = fields["DT_MS"]?.toLongOrNull()
+        val n = fields["N"]?.toIntOrNull()
+
+        if (role == null || seq == null || ts0 == null || dtMs == null || n == null || n <= 0) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "INVALID_START",
+                detail = "WF_START missing or invalid required fields."
+            )
+            return
+        }
+
+        activeWindowsByRole[role] = MutableWaveformWindow_TG(
+            role = role,
+            seq = seq,
+            ts0 = ts0,
+            dtMs = dtMs,
+            expectedSamples = n
+        )
+
+        emitStatus(
+            role = role,
+            seq = seq,
+            status = "START_RECEIVED",
+            detail = "Initialized waveform window with $n expected samples."
+        )
+    }
+
+    private fun handleData(line: String) {
+        val fields = parseKeyValueLine(line)
+
+        val role = fields["ROLE"]?.toIntOrNull()
+        val seq = fields["SEQ"]?.toLongOrNull()
+        val offset = fields["OFFSET"]?.toIntOrNull()
+        val redRaw = fields["RED"]
+        val irRaw = fields["IR"]
+
+        if (role == null || seq == null || offset == null || redRaw == null || irRaw == null) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "INVALID_DATA",
+                detail = "WF_DATA missing or invalid required fields."
+            )
+            return
+        }
+
+        val active = activeWindowsByRole[role]
+        if (active == null) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "DATA_WITHOUT_START",
+                detail = "Received WF_DATA before WF_START."
+            )
+            return
+        }
+
+        if (active.seq != seq) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "SEQ_MISMATCH",
+                detail = "Active window seq=${active.seq}, incoming seq=$seq."
+            )
+            return
+        }
+
+        val redValues = parsePipeSeparatedInts(redRaw)
+        val irValues = parsePipeSeparatedInts(irRaw)
+
+        if (redValues.isEmpty() || irValues.isEmpty()) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "EMPTY_CHUNK",
+                detail = "WF_DATA chunk contained no usable values."
+            )
+            return
+        }
+
+        if (redValues.size != irValues.size) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "CHANNEL_LENGTH_MISMATCH",
+                detail = "RED count=${redValues.size}, IR count=${irValues.size}."
+            )
+            return
+        }
+
+        for (i in redValues.indices) {
+            val targetIndex = offset + i
+            if (targetIndex !in 0 until active.expectedSamples) continue
+
+            active.red[targetIndex] = redValues[i]
+            active.ir[targetIndex] = irValues[i]
+            active.received[targetIndex] = true
+        }
+
+        emitStatus(
+            role = role,
+            seq = seq,
+            status = "DATA_RECEIVED",
+            detail = "Stored ${redValues.size} samples at offset $offset."
+        )
+    }
+
+    private fun handleEnd(line: String) {
+        val fields = parseKeyValueLine(line)
+
+        val role = fields["ROLE"]?.toIntOrNull()
+        val seq = fields["SEQ"]?.toLongOrNull()
+
+        if (role == null || seq == null) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "INVALID_END",
+                detail = "WF_END missing or invalid required fields."
+            )
+            return
+        }
+
+        val active = activeWindowsByRole[role]
+        if (active == null) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "END_WITHOUT_START",
+                detail = "Received WF_END before WF_START."
+            )
+            return
+        }
+
+        if (active.seq != seq) {
+            emitStatus(
+                role = role,
+                seq = seq,
+                status = "END_SEQ_MISMATCH",
+                detail = "Active window seq=${active.seq}, incoming seq=$seq."
+            )
+            return
+        }
+
+        val receivedSamples = active.received.count { it }
+        val completeness =
+            if (active.expectedSamples > 0) {
+                receivedSamples.toDouble() / active.expectedSamples.toDouble()
+            } else {
+                0.0
+            }
+
+        val samples = buildCompletedSamples(active)
+        val features = extractBasicFeatures(samples, active.dtMs)
+
+        val completed = CompletedPpgWaveformWindow_TG(
+            role = active.role,
+            seq = active.seq,
+            ts0 = active.ts0,
+            dtMs = active.dtMs,
+            expectedSamples = active.expectedSamples,
+            receivedSamples = receivedSamples,
+            completeness = completeness,
+            samples = samples,
+            features = features
+        )
+
+        onWaveformComplete(completed)
+
+        emitStatus(
+            role = role,
+            seq = seq,
+            status = "WINDOW_COMPLETE",
+            detail = "Completed window with $receivedSamples/${active.expectedSamples} samples."
+        )
+
+        activeWindowsByRole.remove(role)
+    }
+
+    private fun buildCompletedSamples(window: MutableWaveformWindow_TG): List<PpgWaveSample_TG> {
+        val output = ArrayList<PpgWaveSample_TG>(window.expectedSamples)
+
+        for (i in 0 until window.expectedSamples) {
+            output.add(
+                PpgWaveSample_TG(
+                    index = i,
+                    timestampMs = window.ts0 + (i * window.dtMs),
+                    red = window.red[i],
+                    ir = window.ir[i],
+                    present = window.received[i]
+                )
+            )
+        }
+
+        return output
+    }
+
+    private fun extractBasicFeatures(
+        samples: List<PpgWaveSample_TG>,
+        dtMs: Long
+    ): PpgWaveformFeatures_TG {
+        val present = samples.filter { it.present }
+        if (present.isEmpty()) return PpgWaveformFeatures_TG()
+
+        val redValues = present.map { it.red.toDouble() }
+        val irValues = present.map { it.ir.toDouble() }
+
+        val redMean = mean(redValues)
+        val irMean = mean(irValues)
+
+        val redStd = stdDev(redValues, redMean)
+        val irStd = stdDev(irValues, irMean)
+
+        val redMin = redValues.minOrNull() ?: 0.0
+        val redMax = redValues.maxOrNull() ?: 0.0
+        val irMin = irValues.minOrNull() ?: 0.0
+        val irMax = irValues.maxOrNull() ?: 0.0
+
+        val redAc = redMax - redMin
+        val irAc = irMax - irMin
+
+        val redAcDcRatio = if (redMean != 0.0) redAc / redMean else 0.0
+        val irAcDcRatio = if (irMean != 0.0) irAc / irMean else 0.0
+
+        val redPeaks = detectSimplePeaks(redValues)
+        val irPeaks = detectSimplePeaks(irValues)
+
+        val estimatedRedRateBpm = estimateRateBpm(redPeaks, dtMs)
+        val estimatedIrRateBpm = estimateRateBpm(irPeaks, dtMs)
+
+        val signalQuality = computeSignalQuality(
+            redValues = redValues,
+            irValues = irValues,
+            redStd = redStd,
+            irStd = irStd
+        )
+
+        return PpgWaveformFeatures_TG(
+            redMean = redMean,
+            irMean = irMean,
+            redStd = redStd,
+            irStd = irStd,
+            redMin = redMin,
+            redMax = redMax,
+            irMin = irMin,
+            irMax = irMax,
+            redAc = redAc,
+            irAc = irAc,
+            redAcDcRatio = redAcDcRatio,
+            irAcDcRatio = irAcDcRatio,
+            redPeakCount = redPeaks.size,
+            irPeakCount = irPeaks.size,
+            estimatedRedRateBpm = estimatedRedRateBpm,
+            estimatedIrRateBpm = estimatedIrRateBpm,
+            signalQuality = signalQuality
+        )
+    }
+
+    private fun detectSimplePeaks(values: List<Double>): List<Int> {
+        if (values.size < 5) return emptyList()
+
+        val meanVal = mean(values)
+        val stdVal = stdDev(values, meanVal)
+        val threshold = meanVal + (0.35 * stdVal)
+
+        val peaks = mutableListOf<Int>()
+        var lastPeakIndex = -9999
+        val refractorySamples = 8
+
+        for (i in 2 until values.size - 2) {
+            val v = values[i]
+            val isPeak =
+                v > threshold &&
+                v > values[i - 1] &&
+                v >= values[i + 1] &&
+                v > values[i - 2] &&
+                v >= values[i + 2]
+
+            if (isPeak && (i - lastPeakIndex) >= refractorySamples) {
+                peaks.add(i)
+                lastPeakIndex = i
+            }
+        }
+
+        return peaks
+    }
+
+    private fun estimateRateBpm(peaks: List<Int>, dtMs: Long): Double {
+        if (peaks.size < 2 || dtMs <= 0L) return 0.0
+
+        val intervalsMs = mutableListOf<Double>()
+        for (i in 1 until peaks.size) {
+            val deltaSamples = peaks[i] - peaks[i - 1]
+            intervalsMs.add(deltaSamples * dtMs.toDouble())
+        }
+
+        val avgInterval = mean(intervalsMs)
+        return if (avgInterval > 0.0) 60000.0 / avgInterval else 0.0
+    }
+
+    private fun computeSignalQuality(
+        redValues: List<Double>,
+        irValues: List<Double>,
+        redStd: Double,
+        irStd: Double
+    ): Double {
+        if (redValues.isEmpty() || irValues.isEmpty()) return 0.0
+
+        val redRange = (redValues.maxOrNull() ?: 0.0) - (redValues.minOrNull() ?: 0.0)
+        val irRange = (irValues.maxOrNull() ?: 0.0) - (irValues.minOrNull() ?: 0.0)
+
+        var quality = 0.0
+
+        if (redRange > 20.0) quality += 0.20
+        if (irRange > 20.0) quality += 0.20
+        if (redStd > 5.0) quality += 0.15
+        if (irStd > 5.0) quality += 0.15
+
+        val corr = safeCorrelation(redValues, irValues)
+        if (corr > 0.60) quality += 0.30
+
+        return quality.coerceIn(0.0, 1.0)
+    }
+
+    private fun safeCorrelation(a: List<Double>, b: List<Double>): Double {
+        val n = min(a.size, b.size)
+        if (n < 3) return 0.0
+
+        val ax = a.take(n)
+        val bx = b.take(n)
+
+        val meanA = mean(ax)
+        val meanB = mean(bx)
+
+        var numerator = 0.0
+        var denomA = 0.0
+        var denomB = 0.0
+
+        for (i in 0 until n) {
+            val da = ax[i] - meanA
+            val db = bx[i] - meanB
+            numerator += da * db
+            denomA += da * da
+            denomB += db * db
+        }
+
+        val denom = sqrt(denomA * denomB)
+        return if (denom == 0.0) 0.0 else numerator / denom
+    }
+
+    private fun mean(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        return values.sum() / values.size.toDouble()
+    }
+
+    private fun stdDev(values: List<Double>, mean: Double): Double {
+        if (values.isEmpty()) return 0.0
+        val variance = values.sumOf { (it - mean) * (it - mean) } / values.size.toDouble()
+        return sqrt(variance)
+    }
+
+    private fun parsePipeSeparatedInts(raw: String): List<Int> {
+        if (raw.isBlank()) return emptyList()
+        return raw.split("|").mapNotNull { it.trim().toIntOrNull() }
+    }
+
+    private fun parseKeyValueLine(line: String): Map<String, String> {
+        val parts = line.split(",")
+        val map = mutableMapOf<String, String>()
+
+        for (part in parts.drop(1)) {
+            val idx = part.indexOf(':')
+            if (idx in 1 until part.length) {
+                val key = part.substring(0, idx).trim()
+                val value = part.substring(idx + 1).trim()
+                map[key] = value
+            }
+        }
+
+        return map
+    }
+
+    private fun emitStatus(role: Int?, seq: Long?, status: String, detail: String) {
+        onWaveformStatus?.invoke(
+            WaveformStatusEvent_TG(
+                role = role,
+                seq = seq,
+                status = status,
+                detail = detail
+            )
+        )
+    }
+}
