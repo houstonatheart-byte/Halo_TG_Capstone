@@ -1,0 +1,573 @@
+/*
+ * Created and Designed by: Tiffany Gillmore.
+ *
+ * EstimatedSbpEngine_TG
+ *
+ * Purpose:
+ * - Accept completed waveform windows from the 2 PPG sensors
+ * - Pair them by ROLE
+ * - Align them by timestamp
+ * - Detect pulse feet from the IR waveform
+ * - Estimate pulse transit time (PTT)
+ * - Support one-point calibration from a cuff SBP entered by the user
+ * - Output estimated SBP values for the app
+ *
+ * Notes:
+ * - This is a project/research estimation engine, not a clinical algorithm
+ * - It is designed to work with PpgWaveformEngine_TG.kt
+ * - It expects CompletedPpgWaveformWindow_TG objects, not raw BLE lines
+ */
+
+package com.tactical.app_profile.dataprocessing
+
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+import kotlin.math.sqrt
+
+
+data class EstimatedSbpConfig_TG(
+    val proximalRole: Int = 1,                 // Example: forehead
+    val distalRole: Int = 5,                   // Example: finger
+    val minOverlapSamples: Int = 200,          // minimum overlapping samples required
+    val minPulseCount: Int = 3,                // minimum pulse feet required per signal
+
+    val smoothingWindowSamples: Int = 5,
+    val peakThresholdStdMultiplier: Double = 0.35,
+    val peakRefractorySamples: Int = 8,        // at 50 Hz ~160 ms
+
+    val maxFootSearchBackSamples: Int = 20,
+    val footSearchBackSamples: Int = 8,
+    val footDerivativeFraction: Double = 0.25,
+
+    val minTransitMs: Long = 5L,
+    val maxTransitMs: Long = 400L,
+
+    val minAcAmplitude: Double = 10.0,
+    val minStdForQuality: Double = 3.0,
+
+    // One-point calibration fallback slope:
+    // SBP ≈ intercept + slope * (1 / PTT_ms)
+    val defaultInvPttSlopeMmHgMs: Double = 4500.0
+)
+
+enum class CalibrationModelType_TG {
+    NONE,
+    ONE_POINT
+}
+
+data class SbpCalibrationState_TG(
+    val modelType: CalibrationModelType_TG = CalibrationModelType_TG.NONE,
+    val slope: Double? = null,
+    val intercept: Double? = null,
+    val hrWeight: Double = 0.0
+) {
+    fun isUsable(): Boolean = slope != null && intercept != null
+
+    fun estimateSbp(
+        transitTimeMs: Double,
+        heartRateBpm: Double?,
+        defaultSlope: Double
+    ): Double? {
+        if (transitTimeMs <= 0.0) return null
+
+        val invPtt = 1.0 / transitTimeMs
+        val m = slope ?: defaultSlope
+        val b = intercept ?: return null
+        val hrTerm = (heartRateBpm ?: 0.0) * hrWeight
+
+        val estimate = b + (m * invPtt) + hrTerm
+        return estimate.coerceIn(60.0, 220.0)
+    }
+
+    fun withOnePoint(
+        cuffSbp: Double,
+        transitTimeMs: Double,
+        heartRateBpm: Double?,
+        defaultSlope: Double
+    ): SbpCalibrationState_TG {
+        if (transitTimeMs <= 0.0) return this
+
+        val invPtt = 1.0 / transitTimeMs
+        val hrW = 0.0
+        val hrTerm = (heartRateBpm ?: 0.0) * hrW
+        val intercept = cuffSbp - (defaultSlope * invPtt) - hrTerm
+
+        return copy(
+            modelType = CalibrationModelType_TG.ONE_POINT,
+            slope = defaultSlope,
+            intercept = intercept,
+            hrWeight = hrW
+        )
+    }
+}
+
+data class EstimatedSbpOutput_TG(
+    val epochMillis: Long,
+    val estimatedSbp: Double?,
+    val hrBpm: Int?,
+    val transitTimeMs: Double?,
+    val quality: Double,
+    val calibrated: Boolean,
+    val status: String,
+    val detail: String
+)
+
+private data class PairedWaveformWindow_TG(
+    val startEpochMs: Long,
+    val dtMs: Long,
+    val proximalSamples: List<PpgWaveSample_TG>,
+    val distalSamples: List<PpgWaveSample_TG>
+)
+
+private data class WaveformTimingAnalysis_TG(
+    val role: Int,
+    val footTimesMs: List<Long> = emptyList(),
+    val acAmplitude: Double = 0.0,
+    val quality: Double = 0.0
+)
+
+class EstimatedSbpEngine_TG(
+    private val config: EstimatedSbpConfig_TG = EstimatedSbpConfig_TG()
+) {
+    private val latestWindowsByRole = mutableMapOf<Int, CompletedPpgWaveformWindow_TG>()
+    private var calibrationState = SbpCalibrationState_TG()
+
+    /**
+     * Feed this engine one completed waveform window at a time.
+     * Once both required roles are available, it attempts an SBP estimate.
+     */
+    fun update(
+        window: CompletedPpgWaveformWindow_TG,
+        currentHrBpm: Int? = null
+    ): EstimatedSbpOutput_TG? {
+        latestWindowsByRole[window.role] = window
+
+        val proximal = latestWindowsByRole[config.proximalRole] ?: return null
+        val distal = latestWindowsByRole[config.distalRole] ?: return null
+
+        val paired = pairWindows(proximal, distal) ?: return EstimatedSbpOutput_TG(
+            epochMillis = max(proximal.ts0, distal.ts0),
+            estimatedSbp = null,
+            hrBpm = currentHrBpm,
+            transitTimeMs = null,
+            quality = 0.0,
+            calibrated = calibrationState.isUsable(),
+            status = "PAIR_FAILED",
+            detail = "Could not find enough overlapping waveform data between the two sensors."
+        )
+
+        val proximalAnalysis = analyzeWindowForTiming(
+            samples = paired.proximalSamples,
+            dtMs = paired.dtMs,
+            role = proximal.role
+        )
+
+        val distalAnalysis = analyzeWindowForTiming(
+            samples = paired.distalSamples,
+            dtMs = paired.dtMs,
+            role = distal.role
+        )
+
+        if (proximalAnalysis.footTimesMs.size < config.minPulseCount ||
+            distalAnalysis.footTimesMs.size < config.minPulseCount
+        ) {
+            return EstimatedSbpOutput_TG(
+                epochMillis = paired.startEpochMs,
+                estimatedSbp = null,
+                hrBpm = currentHrBpm,
+                transitTimeMs = null,
+                quality = min(proximalAnalysis.quality, distalAnalysis.quality),
+                calibrated = calibrationState.isUsable(),
+                status = "INSUFFICIENT_PULSES",
+                detail = "Not enough clean pulse feet detected in one or both waveform windows."
+            )
+        }
+
+        val matchedTransitTimes = matchTransitTimes(
+            proximalFeet = proximalAnalysis.footTimesMs,
+            distalFeet = distalAnalysis.footTimesMs
+        )
+
+        if (matchedTransitTimes.isEmpty()) {
+            return EstimatedSbpOutput_TG(
+                epochMillis = paired.startEpochMs,
+                estimatedSbp = null,
+                hrBpm = currentHrBpm,
+                transitTimeMs = null,
+                quality = min(proximalAnalysis.quality, distalAnalysis.quality),
+                calibrated = calibrationState.isUsable(),
+                status = "NO_MATCHED_TRANSIT_TIMES",
+                detail = "Pulse feet were detected, but no valid proximal/distal matches were found."
+            )
+        }
+
+        val medianTransitMs = median(matchedTransitTimes)
+        val hrForEstimate = currentHrBpm ?: estimateHrFromFeet(proximalAnalysis.footTimesMs)
+
+        val estimate = calibrationState.estimateSbp(
+            transitTimeMs = medianTransitMs,
+            heartRateBpm = hrForEstimate?.toDouble(),
+            defaultSlope = config.defaultInvPttSlopeMmHgMs
+        )
+
+        val combinedQuality = combineQuality(
+            proximalQuality = proximalAnalysis.quality,
+            distalQuality = distalAnalysis.quality,
+            transitTimes = matchedTransitTimes
+        )
+
+        return EstimatedSbpOutput_TG(
+            epochMillis = paired.startEpochMs,
+            estimatedSbp = estimate,
+            hrBpm = hrForEstimate,
+            transitTimeMs = medianTransitMs,
+            quality = combinedQuality,
+            calibrated = calibrationState.isUsable(),
+            status = if (estimate != null) "OK" else "NOT_CALIBRATED",
+            detail = if (estimate != null) {
+                "Estimated from paired PPG timing with ${matchedTransitTimes.size} matched beats."
+            } else {
+                "Transit time was computed, but calibration is not ready yet."
+            }
+        )
+    }
+
+    /**
+     * One-point calibration using a cuff SBP entered by the user in the app.
+     */
+    fun addOnePointCalibration(
+        cuffSbp: Double,
+        transitTimeMs: Double,
+        heartRateBpm: Double? = null
+    ) {
+        calibrationState = calibrationState.withOnePoint(
+            cuffSbp = cuffSbp,
+            transitTimeMs = transitTimeMs,
+            heartRateBpm = heartRateBpm,
+            defaultSlope = config.defaultInvPttSlopeMmHgMs
+        )
+    }
+
+    fun clearCalibration() {
+        calibrationState = SbpCalibrationState_TG()
+    }
+
+    fun getCalibrationState(): SbpCalibrationState_TG = calibrationState
+
+    fun clearRole(role: Int) {
+        latestWindowsByRole.remove(role)
+    }
+
+    fun clearAll() {
+        latestWindowsByRole.clear()
+    }
+
+    // =========================================================
+    // Pairing / alignment
+    // =========================================================
+
+    private fun pairWindows(
+        proximal: CompletedPpgWaveformWindow_TG,
+        distal: CompletedPpgWaveformWindow_TG
+    ): PairedWaveformWindow_TG? {
+        if (proximal.dtMs != distal.dtMs) return null
+
+        val proximalEnd = proximal.ts0 + ((proximal.samples.size - 1).coerceAtLeast(0) * proximal.dtMs)
+        val distalEnd = distal.ts0 + ((distal.samples.size - 1).coerceAtLeast(0) * distal.dtMs)
+
+        val start = max(proximal.ts0, distal.ts0)
+        val end = min(proximalEnd, distalEnd)
+
+        if (end <= start) return null
+
+        val dtMs = proximal.dtMs
+        val overlapCount = (((end - start) / dtMs) + 1).toInt()
+        if (overlapCount < config.minOverlapSamples) return null
+
+        val proximalStartIndex = ((start - proximal.ts0) / dtMs).toInt()
+        val distalStartIndex = ((start - distal.ts0) / dtMs).toInt()
+
+        val proximalSlice = proximal.samples
+            .drop(proximalStartIndex)
+            .take(overlapCount)
+            .filter { it.present }
+
+        val distalSlice = distal.samples
+            .drop(distalStartIndex)
+            .take(overlapCount)
+            .filter { it.present }
+
+        val alignedCount = min(proximalSlice.size, distalSlice.size)
+        if (alignedCount < config.minOverlapSamples) return null
+
+        return PairedWaveformWindow_TG(
+            startEpochMs = start,
+            dtMs = dtMs,
+            proximalSamples = proximalSlice.take(alignedCount),
+            distalSamples = distalSlice.take(alignedCount)
+        )
+    }
+
+    // =========================================================
+    // Waveform analysis
+    // =========================================================
+
+    private fun analyzeWindowForTiming(
+        samples: List<PpgWaveSample_TG>,
+        dtMs: Long,
+        role: Int
+    ): WaveformTimingAnalysis_TG {
+        if (samples.isEmpty()) return WaveformTimingAnalysis_TG(role = role)
+
+        val irValues = samples.map { it.ir.toDouble() }
+        val smoothed = movingAverage(irValues, config.smoothingWindowSamples)
+
+        val acAmplitude = (smoothed.maxOrNull() ?: 0.0) - (smoothed.minOrNull() ?: 0.0)
+        val std = stdDev(smoothed)
+        val mean = mean(smoothed)
+
+        if (acAmplitude <= 0.0 || std <= 0.0) {
+            return WaveformTimingAnalysis_TG(
+                role = role,
+                acAmplitude = acAmplitude,
+                quality = 0.0
+            )
+        }
+
+        val derivative = firstDerivative(smoothed, dtMs.toDouble())
+        val candidatePeaks = detectPeaks(smoothed)
+        val footTimes = mutableListOf<Long>()
+
+        for (peakIndex in candidatePeaks) {
+            val footIndex = findPulseFootBeforePeak(
+                signal = smoothed,
+                derivative = derivative,
+                peakIndex = peakIndex
+            ) ?: continue
+
+            if (footIndex in smoothed.indices) {
+                footTimes.add(samples[footIndex].timestampMs)
+            }
+        }
+
+        val quality = computeTimingQuality(
+            signal = smoothed,
+            mean = mean,
+            std = std,
+            acAmplitude = acAmplitude,
+            footCount = footTimes.size
+        )
+
+        return WaveformTimingAnalysis_TG(
+            role = role,
+            footTimesMs = footTimes,
+            acAmplitude = acAmplitude,
+            quality = quality
+        )
+    }
+
+    private fun detectPeaks(signal: List<Double>): List<Int> {
+        if (signal.size < 5) return emptyList()
+
+        val signalMean = mean(signal)
+        val signalStd = stdDev(signal)
+        val threshold = signalMean + config.peakThresholdStdMultiplier * signalStd
+
+        val peaks = mutableListOf<Int>()
+        var lastAccepted = -10_000
+
+        for (i in 2 until signal.lastIndex - 1) {
+            val isPeak =
+                signal[i] > threshold &&
+                signal[i] > signal[i - 1] &&
+                signal[i] >= signal[i + 1] &&
+                signal[i] > signal[i - 2] &&
+                signal[i] >= signal[i + 2]
+
+            if (isPeak && (i - lastAccepted) >= config.peakRefractorySamples) {
+                peaks.add(i)
+                lastAccepted = i
+            }
+        }
+
+        return peaks
+    }
+
+    /**
+     * Finds the pulse foot as the lowest point before the systolic upstroke/peak.
+     */
+    private fun findPulseFootBeforePeak(
+        signal: List<Double>,
+        derivative: List<Double>,
+        peakIndex: Int
+    ): Int? {
+        if (peakIndex <= 2) return null
+
+        val start = max(0, peakIndex - config.maxFootSearchBackSamples)
+        val end = peakIndex - 1
+        if (end <= start) return null
+
+        val upstrokeThreshold = derivative
+            .subList(start, end + 1)
+            .maxOrNull()
+            ?.times(config.footDerivativeFraction)
+            ?: return null
+
+        var upstrokeIndex: Int? = null
+        for (i in start..end) {
+            if (derivative[i] >= upstrokeThreshold) {
+                upstrokeIndex = i
+                break
+            }
+        }
+
+        val upIdx = upstrokeIndex ?: return null
+        val footSearchStart = max(start, upIdx - config.footSearchBackSamples)
+        val footSearchEnd = upIdx
+
+        var minIndex = footSearchStart
+        var minValue = signal[footSearchStart]
+
+        for (i in footSearchStart..footSearchEnd) {
+            if (signal[i] < minValue) {
+                minValue = signal[i]
+                minIndex = i
+            }
+        }
+
+        return minIndex
+    }
+
+    // =========================================================
+    // Transit time matching
+    // =========================================================
+
+    private fun matchTransitTimes(
+        proximalFeet: List<Long>,
+        distalFeet: List<Long>
+    ): List<Double> {
+        val transitTimes = mutableListOf<Double>()
+        var j = 0
+
+        for (p in proximalFeet) {
+            while (j < distalFeet.size && distalFeet[j] < p + config.minTransitMs) {
+                j++
+            }
+
+            if (j >= distalFeet.size) break
+
+            val candidate = distalFeet[j] - p
+            if (candidate in config.minTransitMs..config.maxTransitMs) {
+                transitTimes.add(candidate.toDouble())
+            }
+        }
+
+        return transitTimes
+    }
+
+    private fun estimateHrFromFeet(footTimesMs: List<Long>): Int? {
+        if (footTimesMs.size < 2) return null
+
+        val intervals = mutableListOf<Double>()
+        for (i in 1 until footTimesMs.size) {
+            val diff = (footTimesMs[i] - footTimesMs[i - 1]).toDouble()
+            if (diff > 0) intervals.add(diff)
+        }
+
+        if (intervals.isEmpty()) return null
+
+        val medianInterval = median(intervals)
+        if (medianInterval <= 0.0) return null
+
+        return (60_000.0 / medianInterval).toInt()
+    }
+
+    private fun combineQuality(
+        proximalQuality: Double,
+        distalQuality: Double,
+        transitTimes: List<Double>
+    ): Double {
+        if (transitTimes.isEmpty()) return 0.0
+
+        val base = min(proximalQuality, distalQuality)
+        val ttStd = stdDev(transitTimes)
+
+        val stabilityPenalty = when {
+            ttStd < 5.0 -> 1.0
+            ttStd < 10.0 -> 0.9
+            ttStd < 20.0 -> 0.75
+            else -> 0.5
+        }
+
+        return (base * stabilityPenalty).coerceIn(0.0, 1.0)
+    }
+
+    // =========================================================
+    // Numeric helpers
+    // =========================================================
+
+    private fun movingAverage(values: List<Double>, window: Int): List<Double> {
+        if (values.isEmpty() || window <= 1) return values
+
+        val half = window / 2
+        return values.indices.map { i ->
+            val s = max(0, i - half)
+            val e = min(values.lastIndex, i + half)
+            mean(values.subList(s, e + 1))
+        }
+    }
+
+    private fun firstDerivative(values: List<Double>, dtMs: Double): List<Double> {
+        if (values.size < 2 || dtMs <= 0.0) return List(values.size) { 0.0 }
+
+        val d = MutableList(values.size) { 0.0 }
+        for (i in 1 until values.size) {
+            d[i] = (values[i] - values[i - 1]) / dtMs
+        }
+        return d
+    }
+
+    private fun mean(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        return values.sum() / values.size.toDouble()
+    }
+
+    private fun stdDev(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        val m = mean(values)
+        val variance = values.sumOf { (it - m).pow(2) } / values.size.toDouble()
+        return sqrt(variance)
+    }
+
+    private fun median(values: List<Double>): Double {
+        if (values.isEmpty()) return 0.0
+        val sorted = values.sorted()
+        val n = sorted.size
+        return if (n % 2 == 1) {
+            sorted[n / 2]
+        } else {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        }
+    }
+
+    private fun computeTimingQuality(
+        signal: List<Double>,
+        mean: Double,
+        std: Double,
+        acAmplitude: Double,
+        footCount: Int
+    ): Double {
+        if (signal.isEmpty()) return 0.0
+
+        var q = 0.0
+
+        if (acAmplitude > config.minAcAmplitude) q += 0.35
+        if (std > config.minStdForQuality) q += 0.20
+        if (abs(mean) > 0.0) q += 0.10
+        if (footCount >= config.minPulseCount) q += 0.35
+
+        return q.coerceIn(0.0, 1.0)
+    }
+}
