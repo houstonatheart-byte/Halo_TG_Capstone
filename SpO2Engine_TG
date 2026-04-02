@@ -1,4 +1,4 @@
-package com.yourteam.dataprocessing
+package com.tactical.app_profile.dataprocessing
 
 data class Spo2Reading(
     val epochMillis: Long,
@@ -8,12 +8,18 @@ data class Spo2Reading(
 data class Spo2UiOutput(
     val epochMillis: Long,
     val spo2: Double,
+    val baselineSpo2: Double?,
+    val spo2PctDrop: Double?,
+    val spo2PctDropPercent: Double?,
     val risk: RiskColor
 )
 
 data class Spo2MlEvent(
     val epochMillis: Long,
     val spo2: Double,
+    val baselineSpo2: Double?,
+    val spo2PctDrop: Double?,
+    val spo2PctDropPercent: Double?,
     val risk: RiskColor
 )
 
@@ -24,9 +30,17 @@ data class Spo2EngineOutput(
 
 class Spo2Engine {
 
-    fun update(reading: Spo2Reading): Spo2EngineOutput {
+    private val history = ArrayDeque<Double>()
+    private val baselineWindowSize = 10
 
+    fun update(reading: Spo2Reading): Spo2EngineOutput {
         val value = reading.spo2.coerceIn(0.0, 100.0)
+
+        val baseline = if (history.isNotEmpty()) history.average() else null
+        val pctDrop = baseline?.let {
+            if (it > 0.0) (it - value) / it else null
+        }
+        val pctDropPercent = pctDrop?.times(100.0)
 
         val risk = when {
             value < 90.0 -> RiskColor.RED
@@ -38,6 +52,9 @@ class Spo2Engine {
         val ui = Spo2UiOutput(
             epochMillis = reading.epochMillis,
             spo2 = value,
+            baselineSpo2 = baseline,
+            spo2PctDrop = pctDrop,
+            spo2PctDropPercent = pctDropPercent,
             risk = risk
         )
 
@@ -45,9 +62,17 @@ class Spo2Engine {
             Spo2MlEvent(
                 epochMillis = reading.epochMillis,
                 spo2 = value,
+                baselineSpo2 = baseline,
+                spo2PctDrop = pctDrop,
+                spo2PctDropPercent = pctDropPercent,
                 risk = risk
             )
         } else null
+
+        history.addLast(value)
+        if (history.size > baselineWindowSize) {
+            history.removeFirst()
+        }
 
         return Spo2EngineOutput(ui, mlEvent)
     }
